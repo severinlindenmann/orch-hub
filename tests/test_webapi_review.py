@@ -47,14 +47,14 @@ def test_review_sign_in_work_is_capped_across_user_ids(w, monkeypatch):
 
 @pytest.mark.xfail(strict=True, reason="P2-1: cookie without the __Host- prefix and Path=/ can be tossed by a sibling")
 def test_review_cookie_uses_host_prefix(w):
-    s, _, h = w.call(
-        "POST", "/session", sign_in_body(w, w.ann), origin=ORIGIN
-    )
+    s, _, h = w.call("POST", "/session", sign_in_body(w, w.ann), origin=ORIGIN)
     assert s == 200
     assert h["Set-Cookie"].startswith("__Host-") and "Path=/;" in h["Set-Cookie"] + ";"
 
 
-@pytest.mark.xfail(strict=True, reason="P2-2: a session is not bound to its client kind; an app token works as a cookie")
+@pytest.mark.xfail(
+    strict=True, reason="P2-2: a session is not bound to its client kind; an app token works as a cookie"
+)
 def test_review_app_token_is_not_accepted_as_a_cookie(w):
     tok = w.login(w.ann)  # client: app
     s, _, _ = w.call("GET", "/session", token=tok, cookie=True)
@@ -73,8 +73,8 @@ def test_review_bad_user_name_creates_no_signing_key(w):
 
 @pytest.mark.xfail(strict=True, reason="P2-4: _render escapes values but not object keys")
 def test_review_render_escapes_keys_too():
-    out = A._render({"a‮b": "x"})
-    assert all("‮" not in k for k in out)
+    out = A._render({"a" + chr(0x202E) + "b": "x"})
+    assert all(chr(0x202E) not in k for k in out)
 
 
 def test_review_held_invariants(w):
@@ -83,7 +83,10 @@ def test_review_held_invariants(w):
     session dies."""
     ann = w.login(w.ann)
     for origin in (None, "null", "http://127.0.0.1:9000.evil"):
-        assert w.call("DELETE", "/session", token=ann, cookie=True, origin=origin)[:2] == (403, {"error": "not_allowed"})
+        assert w.call("DELETE", "/session", token=ann, cookie=True, origin=origin)[:2] == (
+            403,
+            {"error": "not_allowed"},
+        )
     assert w.call("DELETE", "/session", token=ann, origin="null")[:2] == (403, {"error": "not_allowed"})
     assert w.call("POST", "/channels/" + "ab" * 16 + "/revoke", token=ann)[:2] == (403, {"error": "forbidden_role"})
     assert w.call("GET", "/admin/audit", token=ann)[:2] == (403, {"error": "forbidden_role"})
