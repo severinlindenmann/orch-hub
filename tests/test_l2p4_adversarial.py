@@ -27,7 +27,7 @@ def _created(title: str) -> dict:
 )
 def test_l2p4_3_text_rule_refuses_private_use():
     with pytest.raises(H.Refused) as r:
-        P4.check_action(_created("Approve  payroll"), role="edit")
+        P4.check_action(_created("Approve " + chr(0xF8FF) + " payroll"), role="edit")
     assert r.value.code == "malformed"
 
 
