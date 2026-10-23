@@ -108,7 +108,8 @@ def test_hub_labels_prefix_free_with_live_core_table():
     live |= {v for v in core_labels.PLANNED_LABELS.values() if v.endswith("|")}
     live |= set(core_hash.LABELS.values())
     hub = set(HUB_LABELS.values()) | {"orch/v2/hub-custodial|gate.approved|"}
-    assert not hub & live
+    # core's C2a labels (what the WSK signs for a hub) are the same strings as the hub's: shared on purpose, so the
+    # table is checked as a union (set), not as disjoint sets
     for a, b in itertools.permutations(sorted(live | hub), 2):
         assert not b.startswith(a), (a, b)
 
@@ -130,3 +131,23 @@ def test_v2_card_check_accepts_the_relay_corpus_card():
         assert r.code == "other_person"
     else:
         raise AssertionError("card accepted under another owner key")
+
+
+def test_question_hash_and_refusals_agree_with_live_core():
+    """#1123: the hub's raw-question hash equals core's ``question_hash`` on every frozen fixture, and everything core
+    refuses is either unhashable there or not renderable here. Needs core code with the raw-question entry (core PR #1135
+    or later); skipped on an older checkout."""
+    import inspect
+
+    from orch_hub.view import project as PR
+
+    if list(inspect.signature(core_hash.question_hash).parameters)[:3] != ["qid", "ticket_uid", "question"]:
+        pytest.skip("core checkout predates the raw-question hash")
+    f = json.loads((Path(__file__).resolve().parent / "data" / "core_f1" / "hashes.json").read_text())
+    for v in f["question_hash"]:
+        assert PR.question_hash(v["qid"], v["ticket"], v["question"]) == core_hash.question_hash(
+            v["qid"], v["ticket"], v["question"]
+        ), v["name"]
+    for v in f["question_hash_refused"]:
+        with pytest.raises(core_hash.HashError):
+            core_hash.question_hash("a" * 32, "T", v["question"])

@@ -10,6 +10,7 @@ synced in hv 0). Pure functions over decoded lines; any shape it cannot read is 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,7 @@ from ..contract.hub import Refused
 ROSTER_TYPES = ("workspace.created", "member.added", "member.removed", "role.changed")
 TICKET_ROLES = ("ticket_owner", "assignees", "reviewers", "watchers")
 _QUESTION = re.compile(r"Q[1-9][0-9]{0,5}")
+_NO_HASH = "sha256:" + "00" * 32
 _KEY = re.compile(r"([A-Z][A-Z0-9]{0,15})-([0-9]{1,9})")
 
 #: ``ticket.json`` defaults for the seven paths a channel may ``set`` (ticket-format §3).
@@ -53,13 +55,90 @@ def question_id(workspace_id: str, ticket_uid: str, question: str) -> str:
     return S.sha256(b"orch/v2/question-id|" + cj(body))[:16].hex()
 
 
-def question_hash(qid: str, ticket_uid: str, text: str, options: list[Any] | None) -> str:
-    """``H("orch/v2/question|" || cj({question_id, ticket, text, options}))`` (``options`` ``[]`` when none)."""
-    body = {"question_id": qid, "ticket": ticket_uid, "text": text, "options": options or []}
+#: The question keys outside ``spec`` (ticket-format §5.6.1): routing and the two parts hashed on their own.
+_NOT_SPEC = ("id", "to", "blocking", "text", "options")
+#: What this hub can render and verify (design #1123 rev 4 §2). Any other kind, spec key or option key makes that ONE
+#: question "unverifiable": shown, never answerable, the ticket stays.
+KINDS = ("choice", "text")
+SPEC_KEYS = frozenset({"kind", "why", "details", "recommended", "allow_other"})
+OPTION_KEYS = frozenset({"key", "label", "text", "facts", "cost"})
+
+
+def question_spec(question: Mapping[str, Any]) -> dict[str, Any]:
+    """``spec``: every key of the raw question except ``id``, ``to``, ``blocking``, ``text``, ``options``."""
+    return {k: v for k, v in question.items() if k not in _NOT_SPEC}
+
+
+def question_hash(qid: str, ticket_uid: str, question: Mapping[str, Any]) -> str:
+    """``H("orch/v2/question|" || cj({question_id, ticket, text, options, spec}))`` over the RAW question: ``options``
+    is ``[]`` when absent, ``spec`` is :func:`question_spec`. The one hash entry (core ``canon.question_hash``); it
+    hashes what it is given and checks no limits (:func:`renderable` is the reader's check)."""
     try:
+        body = {
+            "question_id": qid,
+            "ticket": ticket_uid,
+            "text": question["text"],
+            "options": question.get("options") or [],
+            "spec": question_spec(question),
+        }
         return "sha256:" + S.sha256(b"orch/v2/question|" + cj(body)).hex()
-    except CanonError:
+    except CanonError, KeyError, TypeError:
         raise _bad() from None
+
+
+def _str(x: Any) -> bool:
+    return type(x) is str and x != ""
+
+
+def _option_ok(o: Any) -> bool:
+    if type(o) is not dict or not set(o) <= OPTION_KEYS or not (_str(o.get("key")) and _str(o.get("label"))):
+        return False
+    if not all(_str(o[k]) for k in ("text", "cost") if k in o):
+        return False
+    f = o.get("facts")
+    return f is None or (
+        type(f) is list
+        and 1 <= len(f) <= 3
+        and all(type(p) is list and len(p) == 2 and all(_str(v) for v in p) for p in f)
+    )
+
+
+def _clean(x: Any) -> bool:
+    """No string in ``x`` holds a character :func:`~orch_hub.contract.phase4.render_text` would escape (a tab is the one
+    other control core allows, in ``details``). Core's own text rule refuses these, so a clean question is shown verbatim
+    and nothing hostile ever leaves the view raw."""
+    if type(x) is str:
+        flat = x.replace("\t", " ")
+        return P4.render_text(flat) == flat
+    if type(x) is list:
+        return all(_clean(v) for v in x)
+    if type(x) is dict:
+        return all(_clean(v) for v in x.values())
+    return True  # bool, None, numbers: not text
+
+
+def renderable(q: Mapping[str, Any]) -> bool:
+    """Whether this hub knows every part of the question well enough to show it and to check its hash: a known kind, only
+    known spec and option keys, ``[label, value]`` facts arrays. Not the core limits (the host checked those)."""
+    spec, opts = question_spec(q), q.get("options")
+    kind = spec.get("kind")
+    if (
+        kind not in KINDS
+        or not set(spec) <= SPEC_KEYS
+        or not _str(q.get("text"))
+        or not _clean([q["text"], opts, spec])
+    ):
+        return False
+    if not all(_str(spec[k]) for k in ("why", "details") if k in spec) or (
+        "allow_other" in spec and spec["allow_other"] is not True
+    ):
+        return False
+    if kind == "text":
+        return opts is None and "recommended" not in spec and "allow_other" not in spec
+    if type(opts) is not list or not 2 <= len(opts) <= 6 or not all(_option_ok(o) for o in opts):
+        return False
+    keys = [o["key"] for o in opts]
+    return len(set(keys)) == len(keys) and ("recommended" not in spec or spec["recommended"] in keys)
 
 
 @dataclass
@@ -92,6 +171,7 @@ class Question:
     hash: str
     obj: dict[str, Any]
     answered: bool = False
+    verified: bool = True  # the hash recomputes from the raw question AND this hub can render every part of it
 
 
 @dataclass
@@ -144,17 +224,15 @@ def project_ticket(lines: list[dict[str, Any]], workspace_id: str, uid: str) -> 
                 qn = q["id"]
                 if not _QUESTION.fullmatch(qn):
                     raise _bad()
-                opts = q.get("options")
-                if opts is not None and not (
-                    type(opts) is list
-                    and all(type(o) is dict and type(o.get("key")) is str and type(o.get("label")) is str for o in opts)
-                ):
-                    raise _bad()  # closed shape: options are {key, label} objects with string values
                 qid = question_id(workspace_id, uid, qn)
-                h = question_hash(qid, uid, q["text"], q.get("options"))
-                if e.get("qid") != qid or e.get("hash") != h:  # the host's own derived values must agree
-                    raise _bad()
-                t.questions[qn] = Question(qn, qid, h, q)
+                try:
+                    h: Any = question_hash(qid, uid, q)
+                except Refused:
+                    h = None
+                claimed = e.get("hash")
+                # a question that fails to verify stays in the ticket, marked: never shown as answerable, never drops it
+                ok = h is not None and e.get("qid") == qid and claimed == h and renderable(q)
+                t.questions[qn] = Question(qn, qid, claimed if P4._hash(claimed) else _NO_HASH, q, verified=ok)
             elif typ == "question.answered":
                 q2 = t.questions.get(e["question"])
                 if q2 is not None and q2.hash == e.get("hash"):
