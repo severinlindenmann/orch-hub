@@ -108,8 +108,12 @@ def test_hub_labels_prefix_free_with_live_core_table():
     live |= {v for v in core_labels.PLANNED_LABELS.values() if v.endswith("|")}
     live |= set(core_hash.LABELS.values())
     hub = set(HUB_LABELS.values()) | {"orch/v2/hub-custodial|gate.approved|"}
-    # core's C2a labels (what the WSK signs for a hub) are the same strings as the hub's: shared on purpose, so the
-    # table is checked as a union (set), not as disjoint sets
+    # core's C2a labels (what the WSK signs for a hub) are the same strings as the hub's: shared on purpose. Every shared
+    # string must carry the same NAME on both sides; the rest stays disjoint, and the union stays prefix-free.
+    core_names = {v: k for k, v in {**core_labels.LABELS, **core_labels.PLANNED_LABELS}.items() if v.endswith("|")}
+    hub_names = {v: k for k, v in HUB_LABELS.items()}
+    shared = (set(hub_names) | {"orch/v2/hub-custodial|gate.approved|"}) & set(core_names)
+    assert all(core_names[x] == hub_names[x] for x in shared), {x for x in shared if core_names[x] != hub_names.get(x)}
     for a, b in itertools.permutations(sorted(live | hub), 2):
         assert not b.startswith(a), (a, b)
 

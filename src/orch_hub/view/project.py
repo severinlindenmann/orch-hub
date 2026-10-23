@@ -10,6 +10,7 @@ synced in hv 0). Pure functions over decoded lines; any shape it cannot read is 
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -86,59 +87,77 @@ def question_hash(qid: str, ticket_uid: str, question: Mapping[str, Any]) -> str
         raise _bad() from None
 
 
-def _str(x: Any) -> bool:
-    return type(x) is str and x != ""
+def _field(x: Any, n: int, *, one_line: bool = False) -> bool:
+    """One text field under the cheap core limits (core ``check_plain``): 1..``n`` code points and 4096 bytes, NFC, not blank
+    (Unicode White_Space), no character ``render_text`` would escape, and no LF or tab in a one-line field. Exact fold tables
+    and the leading-mark rule stay core's (the host re-checks on admission)."""
+    if type(x) is not str or not x or len(x) > n or not x.strip():
+        return False
+    try:
+        if len(x.encode("utf-8")) > 4096:
+            return False
+    except UnicodeEncodeError:
+        return False
+    if unicodedata.normalize("NFC", x) != x or (one_line and ("\n" in x or "\t" in x)):
+        return False
+    flat = x.replace("\t", " ")
+    return P4.render_text(flat) == flat
+
+
+def _fold(s: str) -> str:
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", s).casefold())
 
 
 def _option_ok(o: Any) -> bool:
-    if type(o) is not dict or not set(o) <= OPTION_KEYS or not (_str(o.get("key")) and _str(o.get("label"))):
+    if (
+        type(o) is not dict
+        or not set(o) <= OPTION_KEYS
+        or not (_field(o.get("key"), 32) and _field(o.get("label"), 60, one_line=True))
+    ):
         return False
-    if not all(_str(o[k]) for k in ("text", "cost") if k in o):
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", o["key"]):
+        return False
+    if ("text" in o and not _field(o["text"], 200, one_line=True)) or (
+        "cost" in o and not _field(o["cost"], 60, one_line=True)
+    ):
         return False
     f = o.get("facts")
-    return f is None or (
-        type(f) is list
-        and 1 <= len(f) <= 3
-        and all(type(p) is list and len(p) == 2 and all(_str(v) for v in p) for p in f)
-    )
-
-
-def _clean(x: Any) -> bool:
-    """No string in ``x`` holds a character :func:`~orch_hub.contract.phase4.render_text` would escape (a tab is the one
-    other control core allows, in ``details``). Core's own text rule refuses these, so a clean question is shown verbatim
-    and nothing hostile ever leaves the view raw."""
-    if type(x) is str:
-        flat = x.replace("\t", " ")
-        return P4.render_text(flat) == flat
-    if type(x) is list:
-        return all(_clean(v) for v in x)
-    if type(x) is dict:
-        return all(_clean(v) for v in x.values())
-    return True  # bool, None, numbers: not text
-
-
-def renderable(q: Mapping[str, Any]) -> bool:
-    """Whether this hub knows every part of the question well enough to show it and to check its hash: a known kind, only
-    known spec and option keys, ``[label, value]`` facts arrays. Not the core limits (the host checked those)."""
-    spec, opts = question_spec(q), q.get("options")
-    kind = spec.get("kind")
-    if (
-        kind not in KINDS
-        or not set(spec) <= SPEC_KEYS
-        or not _str(q.get("text"))
-        or not _clean([q["text"], opts, spec])
+    if f is None:
+        return True
+    if not (type(f) is list and 1 <= len(f) <= 3):
+        return False
+    if not all(
+        type(p) is list and len(p) == 2 and _field(p[0], 24, one_line=True) and _field(p[1], 40, one_line=True)
+        for p in f
     ):
         return False
-    if not all(_str(spec[k]) for k in ("why", "details") if k in spec) or (
-        "allow_other" in spec and spec["allow_other"] is not True
-    ):
+    return len({_fold(p[0]) for p in f}) == len(f)
+
+
+def renderable(q: Any) -> bool:
+    """Whether this hub knows every part of the question well enough to show it and check its hash, and the cheap core
+    limits hold (see :func:`_field`; unique titles under ``casefold(NFC(.))``): known kind, spec and option keys,
+    ``[label, value]`` facts, a boolean ``blocking``. A question that fails is "unverifiable", never answerable."""
+    if not isinstance(q, Mapping) or type(q.get("blocking")) is not bool:
+        return False
+    spec, opts = question_spec(q), q.get("options")
+    kind = spec.get("kind")
+    if kind not in KINDS or not set(spec) <= SPEC_KEYS or not _field(q.get("text"), 140):
+        return False
+    if ("why" in spec and not _field(spec["why"], 4096)) or ("details" in spec and not _field(spec["details"], 1500)):
+        return False
+    if "allow_other" in spec and spec["allow_other"] is not True:
         return False
     if kind == "text":
         return opts is None and "recommended" not in spec and "allow_other" not in spec
     if type(opts) is not list or not 2 <= len(opts) <= 6 or not all(_option_ok(o) for o in opts):
         return False
     keys = [o["key"] for o in opts]
-    return len(set(keys)) == len(keys) and ("recommended" not in spec or spec["recommended"] in keys)
+    return (
+        len(set(keys)) == len(keys)
+        and len({_fold(o["label"]) for o in opts}) == len(opts)
+        and ("recommended" not in spec or spec["recommended"] in keys)
+    )
 
 
 @dataclass

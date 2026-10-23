@@ -45,38 +45,29 @@ def test_re_ask_changing_only_routing_keeps_the_hash():
     assert by["choice_full_reask_to"] == by["choice_full_reask_blocking"] == by["choice_full"]
 
 
-_STRUCTURAL = {
-    "legacy_shape_without_kind", "legacy_text_only_without_kind", "kind_null", "kind_unknown", "not_an_object",
-    "unknown_question_key", "unknown_option_key", "choice_without_options", "choice_one_option",
-    "choice_seven_options", "text_with_options", "text_with_recommended", "text_with_allow_other", "allow_other_false",
-    "allow_other_null", "recommended_not_a_key", "question_empty", "why_empty", "details_empty", "option_title_empty",
-    "option_text_empty", "option_cost_empty", "facts_empty_list", "facts_object_form", "facts_four", "fact_three_items",
-    "fact_one_item", "fact_label_empty", "fact_value_empty", "fact_value_not_text", "key_duplicate",
+# What only core checks, each with the reason it is not mirrored here (the host re-checks on admission, so a question with
+# one of these never reaches a ticket; the hub only has to be no more permissive on what it can cheaply see).
+_CORE_ONLY = {
+    "option_title_leading_mark": "leading combining mark: needs the Unicode Mn/Mc tables beyond the text rule",
 }  # fmt: skip
 
 
 @pytest.mark.parametrize("v", HASHES["question_hash_refused"], ids=lambda v: v["name"])
-def test_a_shape_core_refuses_is_never_answerable_here(v):
+def test_everything_core_refuses_is_unverifiable_here(v):
+    if v["name"] in _CORE_ONLY:
+        pytest.skip(_CORE_ONLY[v["name"]])
+    assert not PR.renderable(v["question"]), v["name"]
     q = v["question"]
-    if v["name"] in _STRUCTURAL:
-        assert type(q) is not dict or not PR.renderable(q)
-    # the hub's early ask check refuses what it can see (limits, key form, most characters); core's check_plain and fold
-    # rules (NFC, tab, leading mark, fold uniqueness) stay core's: the host re-checks on admission
-    if (
-        type(q) is dict
-        and v["name"] != "missing_blocking"
-        and "fold" not in v["name"]
-        and not v["name"].startswith("titles_")
-    ):
+    if type(q) is dict:
         ask = {k: x for k, x in q.items() if k != "id"}
         if v["name"] not in (
-            "fact_labels_same_after_fold",
+            "missing_blocking",
             "question_not_nfc",
             "question_crlf",
             "option_title_tab",
-            "option_title_leading_mark",
+            "facts_object_form",
         ):
-            assert not P4._question(ask), v["name"]
+            assert not P4._question(ask) or v["name"].startswith(("titles_", "fact_labels_")), v["name"]
 
 
 @pytest.mark.parametrize("name", list(FORMS))
@@ -309,3 +300,14 @@ def test_custodial_answer_text_limit_is_1000_code_points():
     for t in ("x" * 1001, "\U0001f4c8" * 1001):
         with pytest.raises(Refused):
             P4.check_action({**base, "text": t}, role="edit")
+
+
+def test_item_content_passes_a_verified_question_verbatim_even_with_a_tab():
+    from orch_hub.webapi.api import _item_content
+
+    form = FORMS["choice_full"]["hub_needs"]["content"]
+    assert "\t" in form["spec"]["details"]
+    out = _item_content(form)
+    assert out["text"] == form["text"] and out["options"] == form["options"] and out["spec"] == form["spec"]
+    hostile = {"ticket_title": "a\u202eb", "question": "Q1", "text": "x\u202e", "unverifiable": True}
+    assert _item_content(hostile)["text"] == "x<U+202E>" and _item_content(hostile)["ticket_title"] == "a<U+202E>b"

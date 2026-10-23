@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { describe, questionRenderable, verifyQuestion } from "../../src/orch_hub/web/render.js";
+import { checkBindings, describe, questionRenderable, renderMulti, verifyQuestion } from "../../src/orch_hub/web/render.js";
 
 const FORMS = JSON.parse(readFileSync(new URL("../data/core_f1/questions.json", import.meta.url))).forms;
 const HASHES = JSON.parse(readFileSync(new URL("../data/core_f1/hashes.json", import.meta.url)));
@@ -42,18 +42,23 @@ test("a changed byte anywhere, or an unknown part, makes the question unverifiab
 test("the old label-only question has no spec: not verifiable, not renderable", async () => {
   const c = { question: "Q1", text: "Ok?", options: [{ key: "a", label: "A" }, { key: "b", label: "B" }] };
   assert.equal(await verifyQuestion({ item_id: "x", log: "y", hash: "sha256:" + "0".repeat(64) }, c), null);
-  assert.equal(questionRenderable("Ok?", c.options, undefined), false);
+  assert.equal(questionRenderable("Ok?", c.options, undefined, true), false);
 });
 
-test("core's refused shapes this page can see are not renderable", () => {
+// What only core checks (each: the host re-checks on admission, a question with it never reaches a ticket):
+const CORE_ONLY = new Set(["option_title_leading_mark"]); // needs Unicode Mn/Mc tables; the rest of the fold cases are approximated here
+test("every shape core refuses is not renderable here, but for a short allowlist", () => {
   for (const v of HASHES.question_hash_refused) {
+    if (CORE_ONLY.has(v.name)) continue;
     const q = v.question;
     if (!q || typeof q !== "object") continue;
-    if (["legacy_shape_without_kind", "kind_null", "kind_unknown", "unknown_question_key", "unknown_option_key", "choice_one_option", "choice_seven_options", "text_with_options", "allow_other_false", "recommended_not_a_key", "facts_object_form", "facts_four", "key_duplicate"].includes(v.name)) {
-      const { id, to, blocking, text, options, ...spec } = q;
-      assert.equal(questionRenderable(text, options, spec), false, v.name);
-    }
+    const { id, to, blocking, text, options, ...spec } = q;
+    assert.equal(questionRenderable(text, options, spec, blocking), false, v.name);
   }
+});
+
+test("tab: refused in one-line fields, shown as spaces in multi-line ones", () => {
+  assert.equal(renderMulti("a\tb"), "a    b");
 });
 
 function ctxFor(ev) {
@@ -71,8 +76,10 @@ test("the prompt shows the selected option (title, meaning, facts, cost, questio
   assert.equal(d.facts[0][0], "You chose");
   assert.equal(rows["You chose"], "Monthly CSV");
   assert.equal(rows["What it means"], "One file a month, checked by hand");
-  assert.equal(rows.Effort, "½ day");
-  assert.equal(rows.Cost, "½ day");
+  assert.equal(rows["Fact: Effort"], "½ day");
+  assert.equal(rows["Fact: Cost"], "CHF 400");
+  assert.equal(rows["Option key"], "csv");
+  assert.match(rows.Recommended, /^yes/);
   assert.equal(rows.Question, f.raw_event.question.text);
   assert.match(rows.Details, /we import monthly/);
 });
@@ -95,4 +102,39 @@ test("the prompt escapes hidden characters in the shown option", async () => {
   const qv = { text: c.text, options: c.options, spec: c.spec, hash: row.hash };
   const d = describe(ctxFor({ hash: "x", option: "csv" }), D, null, qv);
   assert.match(d.sentence, /Pay<U\+202E>out/);
+});
+
+test("EVERY question.answered needs the verified question; a text-only answer without one is unsignable", async () => {
+  assert.equal(describe(ctxFor({ hash: "sha256:" + "11".repeat(32), text: "free text" }), D).signable, false);
+  assert.equal(describe(ctxFor({ hash: "sha256:" + "11".repeat(32), text: "free text" }), D, null, null).signable, false);
+  const t = form("text_with_why_and_details");
+  const tq = await verifyQuestion(t.hub_needs.row, t.hub_needs.content);
+  assert.equal(describe(ctxFor({ hash: tq.hash, text: "Acme" }), D, null, tq).signable, true);
+  assert.equal(describe(ctxFor({ hash: tq.hash, option: "a" }), D, null, tq).signable, false, "text kind takes no option");
+  const c = form("choice_full");
+  const cq = await verifyQuestion(c.hub_needs.row, c.hub_needs.content);
+  assert.equal(describe(ctxFor({ hash: cq.hash, text: "else" }), D, null, cq).signable, true, "Other with allow_other");
+  const noOther = { ...cq, spec: { ...cq.spec, allow_other: undefined } };
+  delete noOther.spec.allow_other;
+  assert.equal(describe(ctxFor({ hash: cq.hash, text: "else" }), D, null, noOther).signable, false, "Other without allow_other");
+  assert.equal(describe(ctxFor({ hash: cq.hash }), D, null, cq).signable, false, "neither option nor text");
+});
+
+test("a fact label cannot imitate a row of this page", async () => {
+  const f = form("choice_full");
+  const c = clone(f.hub_needs.content);
+  c.options[0].facts[0][0] = "You chose";
+  const qv = { text: c.text, options: c.options, spec: c.spec, hash: "h" };
+  const labels = describe(ctxFor({ hash: "h", option: "csv" }), D, null, qv).facts.map((r) => r[0]);
+  assert.equal(labels.filter((l) => l === "You chose").length, 1);
+  assert.ok(labels.includes("Fact: You chose"));
+});
+
+test("bindings: an answer carries exactly the option/text keys that were sent", () => {
+  const me = { channelId: "c".repeat(32), keyPub: "KEY", userId: "u".repeat(32), hubId: "h".repeat(32) };
+  const ev = (extra) => ({ ...ctxFor({ hash: "h", option: "a", ...extra }), event: { ...ctxFor({ hash: "h", option: "a", ...extra }).event, channel: me.channelId, actor: { kind: "person", id: "u_" + me.userId, via: me.channelId }, hub_id: me.hubId, channel_factor: "password+totp", channel_cert: { o: { channel_id: me.channelId, key_pub: "KEY", user_id: me.userId, factor: "password+totp" } } } });
+  const sent = { workspaceId: "aa".repeat(16), action: { type: "question.answered", log: "01J9ZK4Q7M3R8T2V6X0B5N1C9D", question: "Q1", hash: "h", option: "a" } };
+  assert.doesNotThrow(() => checkBindings(ev({}), me, sent));
+  assert.throws(() => checkBindings(ev({ text: "added note" }), me, sent));
+  assert.throws(() => checkBindings(ev({}), me, { ...sent, action: { ...sent.action, text: "n" } }));
 });

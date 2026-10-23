@@ -5,7 +5,7 @@ import { CanonError, parseStrict } from "./cj.js";
 import { ChannelError, deleteChannel, generateKey, loadChannel, saveChannel, signProof, signRegistration } from "./channel.js";
 import { homeView } from "./home.js";
 import { adminView } from "./admin.js";
-import { Refusal, checkBindings, checkPrepared, describe, renderText, shortHash, verifyQuestion, DECISIONS } from "./render.js";
+import { Refusal, checkBindings, checkPrepared, describe, renderMulti, renderText, shortHash, verifyQuestion, DECISIONS } from "./render.js";
 
 const root = document.getElementById("app");
 const state = { user: null, me: null, channels: [], notice: null };
@@ -189,14 +189,15 @@ async function reviewItem(it) {
   const c = r.body.content ?? {};
   if (it.kind === "gate" || it.kind === "verdict") return reviewDecision(it, c);
   // #1123: the question is hashed HERE from exactly what the hub sent; no Answer button for one we cannot verify or render
+  if (r.body.hash !== it.hash) { state.notice = banner("warn", "This question changed", "Reload your list and review it again."); return home(); }
   const qv = await verifyQuestion(it, c);
-  const head = [h("h1", { text: renderText(c.ticket_title ?? it.title ?? "Question") }), h("p", { class: "sentence", text: renderText(c.text ?? it.title ?? "") })];
+  const head = [h("h1", { text: renderText(c.ticket_title ?? it.title ?? "Question") }), h("p", { class: "sentence", text: renderMulti(c.text ?? it.title ?? "") })];
   const back = h("button", { text: "Back", onclick: home });
   if (!qv) return show(...head, h("p", { class: "small muted", text: "This question cannot be shown or checked here. Answer it on your Mac." }), back);
   const spec = qv.spec;
   const more = [
-    spec.details ? h("details", { open: true }, h("summary", { text: "More detail" }), h("p", { class: "small", text: renderText(spec.details) })) : null,
-    spec.why ? h("p", { class: "muted", text: renderText(spec.why) }) : null,
+    spec.details ? h("details", { open: true }, h("summary", { text: "More detail" }), h("p", { class: "small", text: renderMulti(spec.details) })) : null,
+    spec.why ? h("p", { class: "muted", text: renderMulti(spec.why) }) : null,
   ];
   if (spec.kind !== "choice") return show(...head, ...more, h("p", { class: "small muted", text: "This is an open question. Answer it on your Mac." }), back);
   const card = (o) => h("div", { class: "card" },
@@ -239,7 +240,7 @@ function reviewDecision(it, c) {
 
 function advancedForm(workspaces) {
   const ws = h("select", {}, workspaces.filter((w) => w.can_start).map((w) => h("option", { value: w.workspace_id, text: renderText(w.name ?? w.workspace_id.slice(0, 8)) })));
-  const type = h("select", {}, Object.keys(DECISIONS).map((t) => h("option", { value: t, text: t })));
+  const type = h("select", {}, Object.keys(DECISIONS).filter((t) => t !== "question.answered").map((t) => h("option", { value: t, text: t })));
   const inputs = Object.fromEntries(["log", "question", "gate", "outcome", "hash", "option", "text"].map((k) => [k, h("input", { id: "f-" + k })]));
   const go = h("button", { class: "pri", text: "Review", onclick: () => {
     const action = { type: type.value, log: inputs.log.value.trim() };
