@@ -14,9 +14,11 @@ import signal
 import sys
 import threading
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
+from . import colocation as CO
 from .access import Access, AccessSnapshots
 from .access.cli import ACCESS_FILE
 from .audit import open_log
@@ -67,6 +69,11 @@ class FixedInvites:
                 raise ValueError(f"invite #{i}: the part after '=' ({user[:40]!r}) is not a 32-hex hub user id")
         self._lock = threading.Lock()
 
+    def codes(self) -> list[str]:
+        """The unused codes, sorted (never the ``=USER_ID`` alias part)."""
+        with self._lock:
+            return sorted(self._codes)
+
     def owner_user(self, invite: str) -> str | None:
         return self._owner.get(invite)
 
@@ -79,6 +86,11 @@ class FixedInvites:
     def consume(self, invite: str, workspace_id: str) -> None:
         with self._lock:
             self._codes.discard(invite)
+
+
+def invite_line(hub_id: str, code: str) -> str:
+    """The workspace invite form ``<hub_id>:<code>`` (protocol §5), printed wherever the hub shows an invite."""
+    return f"invite {hub_id}:{code}"
 
 
 def parse_listen(value: str) -> tuple[str, int]:
@@ -94,10 +106,14 @@ def parse_listen(value: str) -> tuple[str, int]:
 
 def serve(
     state: Path,
-    listen: str,
+    listen: str | None,
     publish_url: str,
     invites: list[str],
     *,
+    link_listen: str | None = None,
+    dev_shared_machine: bool = False,
+    accounts: CO.Accounts | None = None,
+    assigned: Callable[[str], bool] = CO.locally_assigned,
     api_host: str | None = None,
     web_listen: str | None = None,
     relay_url: str | None = None,
@@ -110,7 +126,15 @@ def serve(
     out: TextIO | None = None,
 ) -> int:
     out = out or sys.stdout
-    host, port = parse_listen(listen)
+    if (listen is None) == (link_listen is None):
+        raise ValueError("exactly one of --listen (loopback) and --link-listen (network) is required")
+    if listen is not None:
+        if dev_shared_machine:
+            raise ValueError("--dev-shared-machine only goes with --link-listen")
+        host, port = parse_listen(listen)
+    else:
+        assert link_listen is not None
+        host, port = CO.parse_link_listen(link_listen, assigned=assigned)  # raises BindRefused (a ValueError)
     gate = FixedInvites(invites)  # a bad invite refuses before any state is opened
     u = urllib.parse.urlsplit(publish_url)
     api_host = api_host or u.netloc
@@ -118,7 +142,7 @@ def serve(
     # The one HubConfig of this process (orch-hub#30): the dev flag is the held card's, every service gets it below.
     cfg = HubConfig.from_card(
         keys.card(),
-        listen=listen,
+        listen=listen if listen is not None else f"{host}:{port}",
         web_listen=web_listen,
         relay_url=relay_url,
         trusted_peers=trusted_peers,
@@ -126,6 +150,12 @@ def serve(
         allowed_origins=web_origins,
         api_origin=api_origin,
     )
+    bind_warn: str | None = None
+    if link_listen is not None:
+        acc = accounts if accounts is not None else CO.Accounts.load()
+        bind_warn = CO.check_bind_allowed(
+            acc, hub_user=CO.current_user(acc), card_dev=cfg.dev, dev_shared_machine=dev_shared_machine
+        )
     reg_path = state / REGISTRY_FILE
     registry = Registry(str(reg_path))
     access = Access(str(state / ACCESS_FILE))
@@ -249,6 +279,8 @@ def serve(
             for sig in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(sig, lambda *_: stop.set())
         card = keys.card()["o"]
+        if bind_warn is not None:
+            print(f"orch-hub WARN {bind_warn}", file=out, flush=True)
         print(
             f"orch-hub ready port={server.address[1]} tls_spki_sha256={card['tls_spki_sha256']} hub_id={keys.hub_id}",
             file=out,
@@ -256,6 +288,8 @@ def serve(
         )
         if web is not None:
             print(f"orch-hub web port={web.address[1]}", file=out, flush=True)
+        for code in gate.codes():  # protocol §5 invite form: what the workspace owner passes to `orch hub join`
+            print(invite_line(keys.hub_id, code), file=out, flush=True)
         stop.wait()
     finally:
         if web is not None:

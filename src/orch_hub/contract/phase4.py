@@ -175,39 +175,66 @@ def _set(x: Any) -> bool:
     )
 
 
+def _cp(n: int, *, multiline: bool = False, tab: bool = False) -> Any:
+    """The question text rule: ``1..n`` code points (core counts code points) and the one text rule's 4096 bytes."""
+
+    def ok(x: Any) -> bool:
+        flat = x.replace("\t", " ") if tab and type(x) is str else x
+        return text_ok(flat, 4096, multiline=multiline) and len(x) <= n
+
+    return ok
+
+
+_OPTION_KEY = re.compile(r"[a-z][a-z0-9_]{0,31}")
+
+
+def _fact(x: Any) -> bool:
+    return type(x) is list and len(x) == 2 and _cp(24)(x[0]) and _cp(40)(x[1])
+
+
 def _option(x: Any) -> bool:
+    """A choice option (design #1123 rev 4 §2): key, title, and optional text, facts ([label, value] arrays), cost."""
+    f = x.get("facts") if type(x) is dict else None
     return (
         type(x) is dict
-        and {"key", "label"} <= set(x) <= {"key", "label", "cost"}
-        and _re(_TOKEN)(x["key"])
-        and _text(200)(x["label"])
-        and ("cost" not in x or _text(64)(x["cost"]))
+        and {"key", "label"} <= set(x) <= {"key", "label", "text", "facts", "cost"}
+        and _re(_OPTION_KEY)(x["key"])
+        and _cp(60)(x["label"])
+        and ("text" not in x or _cp(200)(x["text"]))
+        and ("cost" not in x or _cp(60)(x["cost"]))
+        and ("facts" not in x or (type(f) is list and 1 <= len(f) <= 3 and all(_fact(p) for p in f)))
+        and ("facts" not in x or len({p[0] for p in f}) == len(f))
     )
 
 
+_QUESTION_KEYS = {"to", "text", "blocking", "kind", "why", "details", "options", "recommended", "allow_other"}
+
+
 def _question(x: Any) -> bool:
-    """The question a person asks (the hub assigns its ``Q`` id from its view)."""
-    if type(x) is not dict or not {"to", "text", "blocking"} <= set(x) <= {
-        "to",
-        "text",
-        "why",
-        "options",
-        "recommended",
-        "blocking",
-    }:
+    """The question a person asks (the hub assigns its ``Q`` id from its view): ``kind`` is required. ``choice``: 2..6
+    options, optional ``recommended`` (an option key) and ``allow_other: true``; ``text``: none of those. The host
+    re-checks everything (core ``validate_question``) when the event arrives; this is the hub's early refusal."""
+    if type(x) is not dict or not {"to", "text", "blocking", "kind"} <= set(x) <= _QUESTION_KEYS:
         return False
-    opts = x.get("options", [])
-    keys = [o["key"] for o in opts] if type(opts) is list and all(_option(o) for o in opts) else None
-    return (
+    common = (
         (_re(_PERSON)(x["to"]) or x["to"] in TICKET_ROLES)
-        and _text(2000, multiline=True)(x["text"])
-        and ("why" not in x or _text(1000, multiline=True)(x["why"]))
-        and keys is not None
-        and len(opts) <= 8
-        and len(keys) == len(set(keys))
-        and ("options" not in x or len(opts) > 0)
-        and ("recommended" not in x or x["recommended"] in keys)
+        and _cp(140, multiline=True)(x["text"])
         and type(x["blocking"]) is bool
+        and ("why" not in x or _cp(4096, multiline=True)(x["why"]))
+        and ("details" not in x or _cp(1500, multiline=True, tab=True)(x["details"]))
+    )
+    if not common:
+        return False
+    if x["kind"] == "text":
+        return not {"options", "recommended", "allow_other"} & set(x)
+    opts = x.get("options")
+    if x["kind"] != "choice" or type(opts) is not list or not 2 <= len(opts) <= 6 or not all(_option(o) for o in opts):
+        return False
+    keys = [o["key"] for o in opts]
+    return (
+        len(keys) == len(set(keys))
+        and ("recommended" not in x or x["recommended"] in keys)
+        and ("allow_other" not in x or x["allow_other"] is True)
     )
 
 
@@ -215,6 +242,47 @@ def _visibility(x: Any) -> bool:
     return x == "workspace" or (
         type(x) is dict and set(x) == {"restricted"} and _sorted_unique(_re(_PERSON), 1, 64)(x["restricted"])
     )
+
+
+#: phase 5 (§8.8): value grammars of the grant, device, policy and settings actions (core's schemas, sorted lists)
+_OPNAME = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)?")
+_GRANT = re.compile(r"gr_[0-7][0-9A-HJKMNP-TV-Z]{25}")
+_DEVICE = re.compile(r"d_[0-9a-f]{32}")
+APPROVER_TOKENS = ("owner", "maintainer", "member", "ticket_owner", "assignees", "reviewers", "watchers")
+POLICY_GATES = ("requirements", "plan", "verify", "code")
+SETTINGS_SET: dict[str, Any] = {
+    "grant_hours": lambda x: type(x) is int and 1 <= x <= 168,
+    "claim_ttl_min": lambda x: type(x) is int and 15 <= x <= 1440,
+    "lease_ttl_min": lambda x: type(x) is int and 5 <= x <= 1440,
+}
+
+
+def _gate_policy(x: Any, gate: str) -> bool:
+    """core's ``gatePolicy`` exactly (all five keys), lists sorted and unique; ``code`` per D59 (``codePolicy``)."""
+    if type(x) is not dict or set(x) != {"approvers", "count", "not", "applies", "independent"}:
+        return False
+    tok = _sorted_unique(_enum(*APPROVER_TOKENS), 0, len(APPROVER_TOKENS))
+    applies = x["applies"]
+    ok = (
+        tok(x["approvers"])
+        and len(x["approvers"]) >= 1
+        and type(x["count"]) is int
+        and 1 <= x["count"] <= 16
+        and tok(x["not"])
+        and (applies in ("all", "off") or _sorted_unique(_enum(*TICKET_TYPES), 1, len(TICKET_TYPES))(applies))
+        and type(x["independent"]) is bool
+    )
+    if gate == "code":
+        ok = ok and "assignees" in x["not"] and x["independent"] is True
+    return bool(ok)
+
+
+def _gates(x: Any) -> bool:
+    return type(x) is dict and 1 <= len(x) and all(g in POLICY_GATES and _gate_policy(v, g) for g, v in x.items())
+
+
+def _settings(x: Any) -> bool:
+    return type(x) is dict and 1 <= len(x) and all(k in SETTINGS_SET and SETTINGS_SET[k](v) for k, v in x.items())
 
 
 def visible(visibility: Any, me: Any) -> bool:
@@ -259,13 +327,26 @@ ACTIONS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
     "question.asked": ({"question": _question}, {}),
     "question.answered": (
         {"question": _re(re.compile(r"Q[1-9][0-9]{0,5}")), "hash": _hash},
-        {"option": _re(_TOKEN), "text": _text(4096, multiline=True)},
+        {"option": _re(_OPTION_KEY), "text": _cp(1000, multiline=True)},
     ),
     "gate.approved": ({"gate": _enum(*GATES), "hash": _hash}, {}),
     "gate.changes_requested": ({"gate": _enum(*GATES), "hash": _hash, "text": _text(4096, multiline=True)}, {}),
     "verdict.given": ({"outcome": _enum("pass", "fail"), "hash": _hash}, {"text": _text(4096, multiline=True)}),
     "addon.disabled": ({"name": _re(_ADDON)}, {}),
     "addon.purged": ({"name": _re(_ADDON)}, {}),
+    # phase 5 (§8.8, C10 M6; owner V3-D29): grants, device exclusion, policy and settings
+    "grant.requested": (
+        {
+            "scope": _enum("all", "workable"),
+            "verbs": lambda x: x == "agent" or _sorted_unique(_re(_OPNAME), 1, 32)(x),
+            "hours": lambda x: type(x) is int and 1 <= x <= 168,
+        },
+        {"label": _text(200)},
+    ),
+    "grant.revoked": ({"grant": _re(_GRANT)}, {"reason": _text(500)}),
+    "device.excluded": ({"device": _re(_DEVICE), "reason": _enum("lost", "retired", "compromised")}, {}),
+    "policy.changed": ({"gates": lambda x: _gates(x)}, {}),
+    "settings.changed": ({"set": lambda x: _settings(x)}, {}),
 }
 #: Names an action can never carry at its top level: the envelope, the custodial fields and the host fields are built
 #: by the hub/host. (Nested objects have exact schemas above, so they cannot carry them either.)

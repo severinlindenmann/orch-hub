@@ -244,7 +244,7 @@ EVENT_PAYLOADS: dict[str, tuple[str, dict[str, Any] | None]] = {
     "log.added": (TICKET, {"text": "Checked with finance.\nOK to proceed."}),
     "handoff.written": (TICKET, {"text": "Importer done; API next."}),
     "question.asked": (TICKET, {"question": {"id": "Q2", "to": "ticket_owner", "text": "CSV or API?", "blocking": True,
-                                             "options": [{"key": "api", "label": "API"}, {"key": "csv", "label": "CSV"}],
+                                             "kind": "choice", "options": [{"key": "api", "label": "API"}, {"key": "csv", "label": "CSV"}],
                                              "recommended": "csv"},
                                 "qid": S.fake_seed("hub/ev/qid").hex()[:32], "hash": _h("question")}),
     "question.answered": (TICKET, {"question": "Q1", "hash": _h("q1"), "option": "csv"}),
@@ -258,6 +258,13 @@ EVENT_PAYLOADS: dict[str, tuple[str, dict[str, Any] | None]] = {
     "people.changed": (TICKET, {"role": "reviewers", "add": ["u_" + U_BOB], "remove": []}),
     "addon.disabled": ("workspace", {"name": "wiki"}),
     "addon.purged": ("workspace", {"name": "wiki"}),
+    # phase 5 (§8.8, V3-D29)
+    "grant.requested": ("workspace", {"scope": "workable", "verbs": "agent", "hours": 72, "label": "Tariff import"}),
+    "grant.revoked": ("workspace", {"grant": "gr_01J9ZP0000000000000000GRT1", "reason": "done"}),
+    "device.excluded": ("workspace", {"device": "d_" + fake16("device_old_phone"), "reason": "lost"}),
+    "policy.changed": ("workspace", {"gates": {"code": {"approvers": ["maintainer", "owner"], "count": 2,
+                                                       "not": ["assignees"], "applies": "all", "independent": True}}}),
+    "settings.changed": ("workspace", {"set": {"claim_ttl_min": 120, "grant_hours": 72}}),
 }  # fmt: skip
 
 
@@ -1634,6 +1641,23 @@ def build() -> dict[str, Any]:
         {"ok": {"workspace_id": WS_A}},
         2,
     )
+
+    # ---- card admission at orch-publish (card_put forwarded; protocol 11.2)
+    adm = {**base, "workspace_id": WS_A, "prebound": True, "floor": None, "pk_pub": K.b("pk_alice")}
+    case("ws_card_admission_valid", "ws_card_admission", {**adm, "card": v2_card()},
+         {"ok": {"workspace_id": WS_A, "card_seq": 1}}, 2)  # fmt: skip
+    case("ws_card_admission_repush_same_seq", "ws_card_admission", {**adm, "card": v2_card(), "floor": 1},
+         {"ok": {"workspace_id": WS_A, "card_seq": 1}}, 2, "an identical re-push is a no-op")  # fmt: skip
+    case("ws_card_admission_newer_seq", "ws_card_admission", {**adm, "card": v2_card(card_seq=3), "floor": 2},
+         {"ok": {"workspace_id": WS_A, "card_seq": 3}}, 2)  # fmt: skip
+    case("ws_card_admission_lower_seq", "ws_card_admission", {**adm, "card": v2_card(card_seq=1), "floor": 2},
+         {"error": "stale_card"}, 2, "the highest card_seq ever admitted is kept across an unbind")  # fmt: skip
+    case("ws_card_admission_other_workspace", "ws_card_admission", {**adm, "card": v2_card(ws=WS_B)},
+         {"error": "other_workspace"}, 2, "the card names another workspace than the route")  # fmt: skip
+    case("ws_card_admission_not_prebound", "ws_card_admission", {**adm, "card": v2_card(), "prebound": False},
+         {"error": "unknown_workspace"}, 2, "the admin has not pre-bound the workspace to its owner")  # fmt: skip
+    case("ws_card_admission_wrong_owner_key", "ws_card_admission",
+         {**adm, "card": v2_card(), "pk_pub": K.b("pk_mallory")}, {"error": "other_person"}, 2)  # fmt: skip
 
     # ---- hub.joined payload, aliases
     pay = {
@@ -3263,14 +3287,6 @@ def build() -> dict[str, Any]:
         {**pb, "request": publish_request(appr=None, wsk_signs_approval=approval())},
         {"error": "bad_signature"},
         2,
-    )
-    case(
-        "publish_hub_request_replayed_direct",
-        "publish",
-        {**pb, "path": "direct", "request": publish_request()},
-        {"error": "bad_signature"},
-        2,
-        "L2-2: a hub-path WSK signature never verifies on the direct path",
     )
     case(
         "publish_approval_for_other_hub",

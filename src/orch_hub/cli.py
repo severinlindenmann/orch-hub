@@ -24,6 +24,9 @@ def _parser() -> argparse.ArgumentParser:
     i.add_argument("--relay-url")
     i.add_argument("--tls-spki-sha256", help="b64u SHA-256 of the hub TLS SubjectPublicKeyInfo")
     ks.add_parser("rotate-op", help="new HK_op under the next op_seq; reissues card and all certificates")
+    ks.add_parser(
+        "rotate-tls", help="new persistent TLS key and a re-issued card pinning it (also adds one to an old store)"
+    )
     r = ks.add_parser("revoke-op", help="root-signed revocation of an op certificate (default: the current one)")
     r.add_argument("--cert-id")
     c = ks.add_parser("card", help="print the current card; with options, reissue it (card_seq + 1)")
@@ -37,7 +40,17 @@ def _parser() -> argparse.ArgumentParser:
     ch.add_argument("--factor", required=True, choices=FACTORS)
     sv = sub.add_parser("serve", help="run the dev hub: link server + publish forwarding (loopback only)")
     sv.add_argument("--state", help="hub state dir (default: $ORCH_HUB_STATE)")
-    sv.add_argument("--listen", required=True, help="loopback host:port, e.g. 127.0.0.1:0")
+    sv.add_argument("--listen", help="loopback host:port, e.g. 127.0.0.1:0 (or --link-listen, exactly one)")
+    sv.add_argument(
+        "--link-listen",
+        help="network link bind: one literal private IP assigned to this machine, IP:port (refused on a machine with "
+        "workspace host or agent users, see --dev-shared-machine)",
+    )
+    sv.add_argument(
+        "--dev-shared-machine",
+        action="store_true",
+        help="dev only: allow --link-listen on a machine that has host/agent users (needs a dev card; network link, not separation)",
+    )
     sv.add_argument("--publish-url", required=True, help="orch-publish base URL (https, or http on loopback)")
     sv.add_argument("--api-host", help="host the workspaces sign (default: the host:port of --publish-url)")
     sv.add_argument("--invite", action="append", default=[], help="invite code accepted once (repeatable)")
@@ -62,10 +75,30 @@ def _parser() -> argparse.ArgumentParser:
     rl.add_argument("--publish-url", required=True, help="orch-publish base URL (https, or http on loopback)")
     rl.add_argument("--workspace", help="only this workspace id (32 lower-case hex)")
     rl.add_argument("--json", action="store_true", required=True, help="print JSON (the only format)")
-    dr = sub.add_parser("doctor", help="dev: check the state dir, card, registry, TLS pin and publish route")
+    dr = sub.add_parser(
+        "doctor", help="dev: check the state dir, card, registry, TLS pin, publish route and the co-location rules (4a)"
+    )
     dr.add_argument("--state", help="hub state dir (default: $ORCH_HUB_STATE)")
     dr.add_argument("--listen", help="the running hub's loopback host:port: its TLS key must match the card pin")
     dr.add_argument("--publish-url", help="orch-publish base URL: its /v2/hub/card route must answer")
+    dr.add_argument("--link-listen", help="the running hub's network link IP:port (split dev layout): pin + bind rules")
+    dr.add_argument("--dev-shared-machine", action="store_true", help="the hub runs with this dev exception (WARN)")
+    dr.add_argument(
+        "--skip-link-dial",
+        action="store_true",
+        help="on the hub machine: compare the stored key with the card, do not dial",
+    )
+    dr.add_argument(
+        "--hub-user", default="orch-hub", help="the hub's OS user (default orch-hub; split hub: orch-hub-split)"
+    )
+    dr.add_argument("--fw-dump", help="dump of the loaded hub table (default /run/orch/hub-fw.loaded.json)")
+    dr.add_argument("--link-iface", default="wt0", help="the only interface the network link port accepts on")
+    dr.add_argument(
+        "--layout", choices=("auto", "one-vps", "split"), default="auto", help="assert the layout (default: infer)"
+    )
+    dr.add_argument("--host-user", action="append", default=[], help="a workspace host OS user not named orch-host-*")
+    dr.add_argument("--agent-user", action="append", default=[], help="an agent OS user not named agent-*")
+    dr.add_argument("--fw-file", help="the link firewall file (default: /etc/orch/hub-fw.nft)")
     rg = sub.add_parser("relay", help="dev: the hub's account at its relay (card from the key store)")
     rg.add_argument("--state", help="hub state dir (default: $ORCH_HUB_STATE)")
     rg.add_argument("--relay-url", help="override the card's relay_url (https, or http on loopback)")
@@ -103,6 +136,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.listen,
                 args.publish_url,
                 args.invite,
+                link_listen=args.link_listen,
+                dev_shared_machine=args.dev_shared_machine,
                 api_host=args.api_host,
                 web_listen=args.web_listen,
                 relay_url=args.relay_url,
@@ -134,7 +169,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         except KeysError as e:
             print(f"orch-hub: {e}", file=sys.stderr)
             return 1
-        return 1 if run(state, listen=args.listen, publish_url=args.publish_url, out=sys.stdout) else 0
+        kw = {"fw_file": Path(args.fw_file)} if args.fw_file else {}
+        if args.fw_dump:
+            kw["fw_dump"] = Path(args.fw_dump)
+        return (
+            1
+            if run(
+                state,
+                listen=args.listen,
+                link_listen=args.link_listen,
+                dev_shared_machine=args.dev_shared_machine,
+                hub_user=args.hub_user,
+                link_iface=args.link_iface,
+                skip_link_dial=args.skip_link_dial,
+                publish_url=args.publish_url,
+                out=sys.stdout,
+                layout_flag=args.layout,
+                host_users=args.host_user,
+                agent_users=args.agent_user,
+                **kw,
+            )
+            else 0
+        )
     if args.group == "inspect":
         from .inspect import InspectError, inspect
 
@@ -153,6 +209,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             keys = HubKeys.open(state)
             if args.cmd == "rotate-op":
                 out = keys.rotate_op()
+            elif args.cmd == "rotate-tls":
+                out = keys.rotate_tls()
             elif args.cmd == "revoke-op":
                 out = keys.revoke_op(args.cert_id)
             elif args.cmd == "card":

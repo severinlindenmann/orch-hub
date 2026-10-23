@@ -41,6 +41,7 @@ byte string is canonical unpadded b64u, `lp16(x)` is a 2-byte big-endian length 
 | 10.4 | `hub.space_proposal` (#1020) | `HK_op` | invited host | 4 |
 | 10.7 | the hub's workspace view, `log_sync` (V3-D23) | `WSK` (each line's `host_sig`) | hub | 4 |
 | 10.8 | hub → relay requests (E1) | `HK_op` | orch-relay | 4 |
+| 8.8 | phase 5 (C8/C10, V3-D29): custodial grants, device exclusion, policy and settings; break-glass leave with the hub down | `UK` + channel key; `WSK` | host, orch-publish | 5 |
 
 Not in H0 (named so nobody builds them from guesswork): snapshot
 generations (#910), the standalone signed alias (C4), the `webauthn` passkey channel contract (#908), hub↔hub
@@ -280,7 +281,17 @@ The card has exactly the three members `o`, `op_cert`, `sig` (an exception to §
 **current** revoked set → `revoked`. A revocation that arrives after the card was admitted stops it at once; no caller
 relies on having re-verified the card.
 
-**Pinning.** The host pins `hk_root_pub` at `hub join` (it arrives in the invite and is signed into `hub.joined`, §9.1).
+**Workspace invite form (D12c).** The workspace owner passes the invite as `<hub_id>:<code>`, or as `--hub-id <hub_id>` plus
+the bare `<code>`. `hub_id` is the 128-bit hash of the hub root key (`H(hk_root_pub)[:16]`, 32 lowercase hex), delivered
+out of band by the hub admin; `orch-hub serve` prints it as `invite <hub_id>:<code>` (never with the `=USER_ID` alias). The
+host sends only `<code>` to the hub (the hub never sees the prefix) and compares the card's `hub_id` with the invite's
+before anything is signed: a mismatch is refused `other_hub`, a card whose root does not hash to its `hub_id` is refused
+by `verify_card`. This is not the phone pair link `h1.<hub_id>.<user_id>.<code>` (§6.4): that form names a hub user and
+authorises a phone, while a workspace invite names no user (an operator-chosen `--invite CODE[=USER]` carries the alias
+on the hub side only) and carries no authority beyond one join.
+
+**Pinning.** The host pins `hk_root_pub` at `hub join` (the card arrives with the join, is verified against the invite's
+`hub_id`, and is signed into `hub.joined`, §9.1).
 Only `orch hub repin` (PK only, spec §8) changes the pin. A new `HK_op` reaches the host as a new card (higher
 `op_seq`, new `op_cert`). The TLS pin follows the card: the host takes `tls_spki_sha256` only from a card it verified
 through the pinned root, and drops a pin that came from a revoked op cert.
@@ -627,7 +638,7 @@ The channel API itself (sessions, HTTP, push) is the hub's (D13); these rules ar
    to the full field list (WYSIWYS). It signs only the digest it computed itself.
    **View-derived text is escaped** (L2P4-2d): titles, question texts and option labels come from the workspace's
    events, which agents write and which have no text rule in core; a channel renders every character the §8.5 text
-   rule refuses (other than LF) as `<U+XXXX>` (reference `render_text`, vectors `render_*`). **Content-bound
+   rule refuses (other than LF) as `<U+XXXX>` (reference `render_text`, vectors `render_*`). **Questions** (#1123): the needs content of a question carries `text`, `options` and `spec` VERBATIM (a client hashes exactly `{question_id, ticket, text, options, spec}` and compares with the row `hash`); a question the hub cannot verify (hash mismatch, unknown kind, spec or option key, or a character `render_text` would escape) carries only its escaped `text` and `unverifiable: true`, stays in its ticket, and is never answerable through the hub. The hub web checks the hash itself and shows the selected option (title, text, facts, cost, question, details) in the sign prompt; it offers no Answer button for a question it cannot render or verify. **Tab exception (#1123):** core allows a TAB in the multi-line question fields (`text`, `why`, `details`, answer text) and refuses it in one-line fields (title, option text, cost, fact label and value); the hub's verbatim content keeps the tab, and a channel shows it as spaces in multi-line fields only. The hub also marks unverifiable a question that breaks a cheap core limit (code-point and byte limits, NFC, blank, LF/tab in one-line fields, boolean `blocking`, titles and fact labels unique under `casefold(NFC(.))`); only core checks the exact fold tables and the leading-mark rule. A channel signs `question.answered` only against the verified question it answers (same `hash`) and the kind's answer rule. **Content-bound
    decisions** (L2P4-2c): body text and artifacts are not synced (§10.7), so a channel that offers `gate.approved`,
    `gate.changes_requested` or `verdict.given` shows the decision's hash in short form next to a link to where the
    content was reviewed, and Mission Control shows the same short hash; a channel that cannot do that does not offer
@@ -660,12 +671,12 @@ nothing (D70: read = see). Unknown or unlisted → `not_custodial`.
 | `admin` | `ticket.moved`, `people.changed`, `visibility.changed` | `addon.disabled`, `addon.purged` |
 
 The role is the floor; the F1 rules decide the rest (eligible approvers, ticket owner, D59 independence; §8.3 step 9).
-**Not channel-startable in V3:** `policy.changed` (ticket override and workspace) and `settings.changed`: they
-change who may approve and how signatures are made, and their payloads are free-form policy and settings objects.
-People and visibility changes are `admin`-only through a channel, with exact schemas. **Not custodial in hv 0, and
+**Phase 5 (§8.8, V3-D29):** `grant.requested`, `grant.revoked`, `device.excluded`, `policy.changed` (workspace and
+ticket) and `settings.changed` (three integer keys only) join the table with exact schemas; a host before C10 refuses
+them as `not_custodial`. People and visibility changes are `admin`-only through a channel, with exact schemas. **Not custodial in hv 0, and
 why:** `workspace.created`, `member.*`, `role.changed` (members and roles come from
-grants and snapshots); `device.*` (hub users have no device keys); `hub.joined`, `hub.left` (owner's local key at the
-terminal, break-glass); `grant.issued`, `grant.revoked` (see §16 open points); `addon.granted` (the host derives the
+grants and snapshots); `device.*` except `device.excluded` (§8.8) (hub users have no device keys); `hub.joined`, `hub.left` (owner's local key at the
+terminal, break-glass); `grant.issued` (the host makes the secret: §8.8 `grant.requested`); `addon.granted` (the host derives the
 manifest fields); `restore`, `invalid.acknowledged` (owner recovery); `artifact.*` and `ticket.updated` with
 `sections` (the file bytes and body text are the host's; no transport for them yet); agent-only types (`claim.taken`,
 `task.*`); host types; addon types. Adding a type later needs no new `hv`: a host that does not list it refuses it,
@@ -687,8 +698,8 @@ ticket's uid). `log` is `"workspace"` or a ticket ULID. The fields are exactly (
 | `people.changed` | `role` (ticket people list), `add`, `remove` (sorted unique person ids `p_…`/`u_…`, ≤ 16 each, disjoint, not both empty; `owner`: `add` exactly one, `remove` empty) |
 | `claim.released` | `session`, `reason` (`released`) |
 | `log.added`, `handoff.written` | `text` (≤ 4096 / 2048 bytes) |
-| `question.asked` | `question`: exactly `{to, text, why?, options?, recommended?, blocking}` (no `id`: the hub assigns it); `to` a person id or a question role; `options` 1–8 of exactly `{key, label, cost?}` with unique token keys; `recommended` one of the keys |
-| `question.answered` | `question` (`Q<n>`), `hash`, `option?` (token), `text?` (at least one of the two) |
+| `question.asked` | `question`: `{to, text, blocking, kind}` plus `why?`, `details?` and, per kind: `choice` = `options` (2–6 of `{key, label, text?, facts?, cost?}`, `facts` 1–3 `[label, value]` pairs, token keys unique) with optional `recommended` (one of the keys) and `allow_other: true`; `text` = no options, no `recommended`, no `allow_other`. Text 1–140 code points, `why` ≤ 4096, `details` ≤ 1500; no `id` (the hub assigns it). The host re-checks every limit (core `validate_question`). The hub hashes the raw question: `H("orch/v2/question|", cj({question_id, ticket, text, options or [], spec}))`, `spec` = every key except `id, to, blocking, text, options` (frozen core fixtures `tests/vectors/f1/{hashes,questions}.json`, core PR #1135 commit e0525503) |
+| `question.answered` | `question` (`Q<n>`), `hash`, `option?` (an option key), `text?` (1–1000 code points; at least one of the two). Per kind: a `choice` takes an `option` (plus an optional note) or `text` alone only when `allow_other`; a `text` question takes `text` only |
 | `gate.approved` | `gate` (`requirements`, `plan`, `code`), `hash` |
 | `gate.changes_requested` | `gate`, `hash`, `text` |
 | `verdict.given` | `outcome`, `hash`, `text?` (required on `fail`) |
@@ -803,6 +814,96 @@ reply decides it. The host's reply is a signed w2h reply; its body decides (refe
 - One event in flight per link (§10.2); later events wait behind it in delivery order.
 - The host replies `unavailable` only when it cannot decide now (lock timeout, `freeze.active`, a snapshot it could
   not fetch), never for a refusal on the event's content, so a resend can never turn a refusal into an admission.
+
+### 8.8 Phase-5 additions: grants, devices, policy and settings through a channel (C10 M6, V3-D29)
+
+**Status: decided (owner, V3-D29, 23 Oct; orch-core #838).** Closes the open points "agent grants" and "policy and
+settings" of §16: exactly the five hub-signed custodial types below, no fourth break-glass power. Design:
+`~/orch-dev/state/design-c10.md` (M1, M6), `design-c8.md` (M2.2).
+
+Why: in full mode no local human signature exists (D78, D81; core C11), so without these nobody could issue or revoke
+an agent grant, exclude a lost device or change policy; agents would stop within 168 h.
+
+| Type | Log | Lowest role | Action fields (exact) | Derived by the hub |
+|---|---|---|---|---|
+| `grant.requested` | workspace | `edit` | `scope` (`all` \| `workable`), `verbs` (`"agent"` or 1–32 sorted unique operation names `[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)?`), `hours` (1–168), `label?` (one line ≤ 200 bytes) | nothing |
+| `grant.revoked` | workspace | `edit` | `grant` (`gr_` + ULID), `reason?` (one line) | nothing |
+| `device.excluded` | workspace | `admin` | `device` (`d_` + 32 hex), `reason` (`lost` \| `retired` \| `compromised`) | nothing |
+| `policy.changed` | workspace | `admin` | `gates`: 1–4 of `requirements`, `plan`, `verify`, `code`, each exactly `{approvers, count, not, applies, independent}` (below) | nothing |
+| `policy.changed` | ticket | `edit` | as above (a ticket override; F1 decides who: ticket owner, owners, maintainers) | nothing |
+| `settings.changed` | workspace | `admin` | `set`: 1–3 of `grant_hours` (1–168), `claim_ttl_min` (15–1440), `lease_ttl_min` (5–1440) | nothing |
+
+- **Gate policy** (core `gatePolicy`, lists sorted and unique so a channel shows one form): `approvers` 1–7 of
+  `owner`, `maintainer`, `member`, `ticket_owner`, `assignees`, `reviewers`, `watchers`; `count` 1–16; `not` 0–7 of the
+  same tokens; `applies` `"all"`, `"off"` or 1–5 sorted unique ticket types; `independent` boolean. `code` additionally
+  has `assignees` in `not` and `independent: true` (D59). **No `factor` key** (D66 floors stay off the channel in V3).
+  **A channel never changes a factor floor:** the host applies each named gate as the five keys above and keeps the
+  gate's effective `factor` (the stored one, else the inherited workspace floor; a ticket override inherits the
+  workspace floor and can never lower it). Core vector `policy_changed_channel_keeps_factor`.
+- **Off the channel in V3 (V3-D29)** (`malformed` inside `set` or a gate, `not_custodial` as types): `sign_methods`
+  (how signatures are made), `repos` (host file system paths), `models`, the D66 `factor` key; `grant.issued` itself,
+  including a terminal-printed grant for a hand-started agent (the owner's local act, standalone or after a leave);
+  the person's PK-signed `device.revoked`. Vectors `action_settings_changed_{sign_methods,repos,models,factor}`,
+  `action_policy_changed_factor_key`, `action_{grant_issued,device_revoked}_ws_not_custodial`.
+- **The grant secret stays in the host.** The event carries no `grant`, `secret_hash`, `issued_at` or `expires_at`
+  (`malformed`, vectors `action_grant_requested_smuggles_*`, `custodial_event_grant_requested_with_*`). After admitting
+  `grant.requested`, the host appends, in the same store-lock hold, a **host-actor** `grant.issued` with the same
+  terms, `request` = the request's event `id`, `issued_at` = min(the request's `at`, host now), and a fresh
+  `secret_hash` (core C10). Core's model admits a host-actor `grant.issued` only with a `request` naming an earlier
+  admitted `grant.requested` of equal terms, used once, `|at − request.at| ≤ 300 s`. The grant's person is the request's
+  canonical signer (F1: a grant is always for its signer); its role is that signer's, its device none (the runner
+  binding instead). The secret never travels on the link and is never shown or logged.
+  **The host gives the secret only to its runner, and only for a pending local hand-off (V3-D29):** a Mission Control
+  "Start agent" that a person started **on that host**, recorded host-locally as a hand-off of kind `grant` for the
+  same canonical person and exact terms, at most 10 min old, used once. The record is bound to the workspace id and
+  the current hub binding (`hub_id`, `binding_seq`), is matched and consumed inside the same store-lock hold that
+  appends `grant.issued`, and is dropped when the person cancels it, at `hub.left` and at any new `hub.joined`.
+  Otherwise the host still appends `grant.issued`
+  (the log stays honest) and destroys the secret at once: the grant is inert, shown as "requested from the hub, not
+  started here". So **a phone (or any channel) alone cannot start an agent**, and a hub (the channel CA) cannot mint
+  usable grants nobody asked for (L2-P5-3). The hand-off record is not a log line and makes no link call.
+- **`grant.revoked`:** F1 at the host decides ownership: the signer's own grant (compared as the **canonical** person,
+  alias-resolved) unless the mapped role is owner (`admin`). A hub-side check is advisory (a friendly error only).
+- **`device.excluded`** is workspace-local: the device signs nothing more in this workspace; `compromised` voids open
+  decisions as a compromised device does (ticket-format §5.7). **The host refuses it for a device of a workspace
+  owner** (owner devices go only through the PK-signed `device.revoked`), and an exclusion never applies to
+  break-glass verification, so the hub cannot block `orch hub leave` (L2-P5-2). The global, PK-signed `device.revoked` stays the
+  person's own act and is not custodial.
+- F1 runs after the floor as for every custodial type (§8.3 step 9): grant terms per mapped role (member: `workable`
+  only, at most `grant_hours`), own grants only unless `admin`, workspace policy and settings owner-only (`admin`).
+- `admin` verbs need a sign-in within the last 5 min (spec §7); a channel shows every policy key and value
+  (WYSIWYS, §8.4 step 3). A policy with `applies: "off"` shows the fixed text "turns off the <gate> gate"; a `count`
+  above the people eligible shows "no one can approve this"; the host also returns a warning on admission.
+
+**Break-glass with the hub down (C8; text only, no new object).** `hub.left` (§9.1) is the owner's local act and needs
+no hub. The host then sends `hub.unbound` (§9.3) **directly to orch-publish** (`PUT /v2/hub/bindings/{ws}`, V3-D16),
+which ends hub-forwarded publish and the hub admin read (§10.6), and offers it to the hub over the link whenever one
+comes up. The relay keeps no binding: a `pending` cut-over row (§10.8.3) is deleted by the workspace at the leave; a
+`cut_over` row stays closed. On `unbound` an honest hub also fails its open prepares and queued `event_deliver`s for
+the workspace with `not_bound` and drops the workspace from its users' channel lists. **Every leave voids the open
+hub-signed decisions (V3-D29):** `hub.left` has no reason field in hv 0, so each leave is treated as a compromise of the
+hub; at the `hub.left` position core voids every decision signed `hub:<hub_id>/*` in a still-open generation, whether
+it counts today or not, and a later policy change or a rejoin never revives it (consumed generations stay and are
+listed for the owner, design-c8 M5). **Hub-requested grants end at `hub.left`** too
+(every grant whose `request` is a line of that hub is revoked at that position and its secret dropped; design-c8
+M2.2). The one break-glass set (`hub.leave`, `hub.repin` PK only, `keys.rotate`) is defined in core (C8) and imported
+by C11.
+
+**Cut-over of full-mode workspaces joined before C10 (V3-D29, design-c10 M1).** A full `hub.joined` signed by a host
+with C10 authorizes the cut-over (its review text says "your phones' direct pairing ends; the hub becomes the only
+path"). A full join made before C10 never showed that text, so at the host's first start with C10 it is cut over
+automatically **only** when the workspace is marked dev in the host state dir, the held hub card has `dev: true` and
+the cut-over preflight passes (link authenticated, card verified, a pinned snapshot with an `admin`); every other such
+workspace keeps its direct path (`direct: open`) until the owner runs `orch hub mode full` again and signs the new
+text. `orch hub status` says which applies.
+
+**Host-side conformance (core vectors, required for C8/C10).** The hub vectors above fix only the channel action and
+the event a host admits. The host guarantees of this section are core's own vectors and tests and must exist before
+C8/C10 merge: `host_grant_issued_{needs_request,request_reused,other_terms,late}`, `hub_grant_without_handoff_inert`,
+`hub_grant_with_handoff_once`, `handoff_other_workspace_or_binding_refused`, `grant_revoked_own_via_alias`,
+`device_excluded_owner_device_refused`, `policy_changed_channel_keeps_factor`, `left_hub_events_refused_after_leave`,
+`leave_voids_open_hub_decisions_only` (incl. non-counting, no revival after rejoin), `leave_ends_hub_requested_grants`,
+`rejoin_refuses_pre_leave_custodial`, `pre_c10_non_dev_full_join_not_cut_over` (design-c8 Tests, design-c10 Tests).
 
 ## 9. Join, binding, leave
 
@@ -949,7 +1050,7 @@ card in the `join` message) (vector `link_auth`). One link serves one `workspace
         b64u(Sign(HK_op, "orch/v2/hub-route|" || cj(o)))           (dir h2w)}
 ```
 
-`seq` ≥ 1 per direction and link; `re` is `null` on a request and the request's `seq` on its reply; `body` an object.
+`seq` ≥ 1 per direction and link, one counter for requests and replies alike. The hub enforces it on w2h frames (D12b): the first frame of a link sets the baseline (a host numbers across reconnects), every later frame must be exactly the previous + 1, otherwise the hub answers `malformed` and closes the link before any side effect. The seq is not bound to the link: replay of a frame onto another link needs a TLS break first (L7 SHORTCUT). `re` is `null` on a request and the request's `seq` on its reply; `body` an object.
 
 **The closed operation list** (spec §8, §8a). There is **no operation that asks the hub to sign anything**; an
 unknown `op` is `unknown_op`.
@@ -963,7 +1064,7 @@ unknown `op` is `unknown_op`.
 | `wk_seal` | w2h | full | `{"epoch", "wrap": b64u}`: `WK_e` sealed to `HXK` (v2 §5.3) | `{}` |
 | `publish_out` | w2h | both | `{"request": {method, host, target, headers, body_hex}}` (§11) | `{"status", "body_hex"}` |
 | `join` | w2h | both | `{"invite", "card", "pk_pub", "binding"}`: the v2 card, the owner's PK, the binding (§9.5) | `{}` |
-| `card_put` | w2h | both | `{"card", "pk_pub"}`: the workspace's v2 card, opaque to the hub, forwarded to publish and the relay (§16) | `{}` |
+| `card_put` | w2h | both | `{"card", "pk_pub"}`: the workspace's v2 card, checked against the join pin, forwarded to orch-publish (§11.2 "Admission through the hub"); refusals: `other_person`, `other_workspace`, `wsk_mismatch`, `stale_card`, `not_bound`, and orch-publish's (`unknown_workspace`, `owner_not_allowed`, `workspace_blocked`, `delegation_changed`, `delegation_refused`, `delegation_mismatch`, `bad_signature`, `unavailable`) | `{}` |
 | `binding_put` | w2h | both | `{"object"}`: a `hub.binding` or `hub.unbound`, forwarded as is | `{}` |
 | `audit_ack` | w2h | both | `{"seq", "head": b64u(32)}` | `{"acked": seq}` (§10.5) |
 | `audit_get` | w2h | both | `{"since"}` | `{"records": [{"record": <hub.audit>, "event"?}], "head", "op_certs": [<hub.op_cert>]}` (D4, §10.5; added) |
@@ -1846,10 +1947,30 @@ Every signature comes before the nonce store (v2 §12.1). Policy checks of orch-
 is orch-publish's route definition (`access: "public"` of a share or app); F1 fixes the list, and every such request
 needs step 9.
 
-**Direct requests.** A request without `Orch-Hub` is the v2 direct path, signed under `orch/v2/publish|` and checked as
-v2 §12.1 until the H6 switch, binding or not (SHORTCUT `Direct relay / publish paths behind a flag until H5/H6`). A
-hub-path signature presented there is `bad_signature` (vector `publish_hub_request_replayed_direct`). From H6 on,
-orch-publish refuses direct requests for a workspace with a live binding.
+**Direct requests (V3-D36).** There are none. orch-publish refuses a request without `Orch-Hub` and `Orch-Hub-Signature` as
+`403 hub_required` (half a pair is `400 malformed`), and `POST /v1/ws/{ws}/register` no longer exists: a workspace is
+admitted only through its card (below).
+
+**orch-publish's hub routes** (no transport authentication, V3-D16: every object authenticates itself): `PUT /v2/hub/card`
+(`hub.card`), `PUT /v2/hub/op-revoked`, `PUT /v2/hub/bindings/{ws}` (`hub.binding` / `hub.unbound`, also sent by the host
+directly after a leave), `PUT /v2/hub/cards/{ws}` (below) and `GET|HEAD /v2/hub/releases` (§10.6).
+
+**Admission through the hub (R5a, V3-D36).** A workspace reaches orch-publish only through `card_put` (§10): after the
+hub's own checks (pin, never-change rules, `card_seq`) it forwards `{card, pk_pub}` to `PUT /v2/hub/cards/{workspace_id}`.
+Publish verifies the card itself (owner `PK` delegation, `WSK` card signature, owner = `pk_pub`, workspace = route) and applies
+the admin's pre-bind, the owner allowlist and the block, exactly as the former direct register did; what it keeps is the
+permanent delegation (`delegation_changed`, 409, if it ever differs). It also keeps the highest `card_seq` ever admitted per
+workspace (across an unbind) and refuses a lower one as `stale_card`; an equal or higher one, also the very same card after
+an admin re-pre-bind, is admitted. There is no age limit: the card carries nothing publish does not already hold. Refusals
+come back through the hub as the `card_put` error: `unknown_workspace`, `owner_not_allowed`, `workspace_blocked`,
+`delegation_changed`, `stale_card`, `other_person`, `other_workspace`, `delegation_mismatch`, `delegation_refused`,
+`bad_signature`, `malformed`, `wrong_suite`. Vectors `ws_card_admission_*`.
+
+**What the card route authenticates, and what it does not.** The card binds the workspace id, its owner (`PK` signed the
+delegation) and its `WSK` (the card is `WSK`-signed). Nothing binds a hub: any party holding the card (a hub, a former hub,
+anyone who saw it) can push it, and a hub the workspace never joined can push it. That admits only a workspace the admin
+already pre-bound to that owner, with its own genuine `WSK`, and grants **no publish capability**: publishing still needs a
+`WSK`-signed `hub.binding` naming the hub and the hub's transport signature (§11.2).
 
 ### 11.3 `hub.publish_approval` (V3-D4)
 
@@ -1890,7 +2011,7 @@ same fields instead.)
 inside the `WSK`-signed bytes (`approval_hash`, §11.1), and the approval in turn names the one exact request, nonce
 included. Vectors: `publish_approval_reused_on_second_request` (same body, fresh nonce → `bad_approval`),
 `publish_approval_replayed_with_its_request` (`replay`), `publish_approval_attached_by_hub` and
-`publish_approval_stripped_by_hub` (`bad_signature`), `publish_hub_request_replayed_direct` (`bad_signature`).
+`publish_approval_stripped_by_hub` (`bad_signature`).
 
 Requests for `secret` or `sealed` access keep the v2 path: the host evaluates the charter (spec §5.5, §8 "the agent
 `publish(...)` path is unchanged") and no approval is needed. An approval on such a request is still verified, and its
@@ -2037,7 +2158,7 @@ link errors travel as `{"error": code}` reply bodies; host-side refusals are loc
 | `phase4` | p4: the `log_sync` lines, heads, view key, AAD and one sealed page; a ticket projection `proj_ticket`, a ticket page carrying it and its plaintext bytes (D15b); a prepared context and digest; a relay request and its bytes; the relay routes' request bytes and one sealed push payload (`relay_routes`); the custodial type table; the `space.accept` built from the vector proposal |
 | `share_item_f1` | C3b addendum: a ticket item with an `f1` block and its `item_hash` (§10.2b, §8.6) |
 | `phase4.channel_api` | B stream: a pairing link and its fingerprint, a signed `hub.api_origin`, a `session_ref`, a signed `hub.channel_auth` and `hub.channel_push`, a channel → relay request with its signed bytes, the mailbox list answer |
-| `cases` | 890 cases (228 positive, 662 negative): `check`, `args`, `expect` (`{"ok": …}` or `{"error": code}`), `phase` |
+| `cases` | 962 cases (247 positive, 715 negative; 51 of them phase 5, §8.8): `check`, `args`, `expect` (`{"ok": …}` or `{"error": code}`), `phase` |
 
 The negative cases cover, per object where it applies: wrong domain, wrong signer, expired, binding for another
 workspace, unbound after leave, missing dev marker, dev at a real verifier, extra or unknown field, non-canonical
@@ -2073,7 +2194,7 @@ must equal `page_ticket_with_proj` byte for byte) and the hub runs `proj_build`;
 | 11 | V3-D4 "inside the WSK-signed request" | hub-path WSK bytes `orch/v2/publish-hub\|` cover `hub_id` and `H(approval)`; the approval names the exact request incl. ts and nonce (single use) | V3-D4; L2-2 (the first H0 draft bound only by a ts-less hash: rejected) |
 | 12 | Which publish requests need the approval | public access only; secret/sealed keep the charter path | spec §8 "public access still needs a human signature", §5.5 |
 | 13 | Owner key for the approval | owner's device key with its PK-signed certificate; PK must be the card delegation's owner | D64 local key; v2 §6.1, §7.1 |
-| 14 | Link replay | `seq` carried, not enforced | SHORTCUT (L7) |
+| 14 | Link replay | `seq` strictly consecutive per link (D12b); not bound across links | SHORTCUT (L7, residual) |
 | 15 | Binding replay after leave | store keeps the unbound record (§9.4) | spec §8 "no later hub.unbound" |
 | 16 | Unbound delivery with the hub down | the host sends it to publish directly | spec §8 break-glass "none needs the hub" |
 | 17 | The hub's trust in a workspace's `WSK` at join | the v2 directory card + owner `PK` in `join`; first come per `workspace_id` | L2-3 |
@@ -2104,6 +2225,7 @@ must equal `page_ticket_with_proj` byte for byte) and the hub runs `proj_build`;
 | 41 | Relay cut-over (E3) | workspace names the hub, the hub only confirms; `other_hub` for every workspace that did not name it; hub `PUT` body `{v: 2, state: "cut_over"}`; `cut_over` (403) (§10.8.3) | orch-relay #88 |
 | 43 | The phone side (B stream) | §6.4: operator pairing link pins `hub_id`, and the `HK_op`-signed `hub.api_origin` must equal the link's host before any password (L2B-1); pairing session → channel session by a channel-key-signed, session-bound `hub.channel_auth` (12 h from the password sign-in, scope without registration or admin); a separate software push key named by `hub.channel_push` (the NSE runs locked; one key, one use), §10.8.2 seals to it; §10.8.4 channel-signed mailbox read under `/v2/hub-channels/`, certificate in a header; the hub's signed mailbox purge marks the channel revoked at the relay (`channel_revoked`); a real build refuses loopback/http pairing links; hints also left in the mailbox | state/design-b-phone.md, orch-core #861–#866 |
 | 44 | Full-mode gate decisions and status moves (D15b, orch-core #1043) | the host's own projection `P` (F1 gate values, status, roster version at one ticket head and workspace position) inside the sealed `log_sync` page; the hub copies, never computes; stale → `unavailable`; no new op, label or event field (§10.7) | state/design-d15b.md; one engine decides what is shown and what is checked |
+| 45 | Phase 5: grants, devices, policy, settings through a channel; break-glass leave (C8/C10) | the five custodial types of §8.8 with exact schemas; the host makes the grant secret and gives it to its runner only for a Mission Control start on that host (a phone alone cannot start an agent); `sign_methods`, `repos`, `models`, D66 `factor`, terminal grants stay off the channel; every leave voids open hub-signed decisions and ends hub-requested grants; pre-C10 full joins cut over automatically only for a dev workspace with a dev hub card | owner V3-D29 (orch-core #838), design-c8.md, design-c10.md |
 | 34 | New audit types | `channel` and `share` are additive `type` values of `hub.audit` in `hv: 0`: **orch-core's audit verifier must accept them** (its type enum and event field table), as the hub does | orchestrator lean, adopted |
 
 **SHORTCUTS added by the phase-4 extension** (for the #838 table): `Phone key attestation by operator pairing code (no
@@ -2136,11 +2258,11 @@ transport in the action).
   hands to the agent; the hub cannot build it from its view, so it is not custodial (§8.5). With D78/D81 (no local
   human signing in full mode after H5) nobody could then start an agent there. Options: (a) the action carries the
   `secret_hash` from the host via the channel (the host shows the person a one-time handle), (b) the host makes the
-  secret and the channel only signs; (c) keep owner-local signing for `grant.*` as a fourth break-glass power. Needs an
-  orchestrator decision before C10/H5.
-- **Policy and settings changes in a full-mode hub workspace.** Not channel-startable in V3 (§8.5); with no local
-  human signing in full mode after H5 (D78/D81), they then need either an admin-only custodial type with an exact
-  policy/settings schema and a full review screen, or a break-glass power. Decide together with agent grants.
+  secret and the channel only signs; (c) keep owner-local signing for `grant.*` as a fourth break-glass power.
+  **Decided (V3-D29): (b)**, as `grant.requested` plus a host-actor `grant.issued`, usable only for an agent a person
+  started from Mission Control on that host (§8.8).
+- **Policy and settings changes in a full-mode hub workspace.** **Decided (V3-D29):** admin-only custodial types with
+  exact schemas, three settings keys; `sign_methods`, `repos`, `models` and the D66 `factor` stay off the channel (§8.8).
 - (Decided, C3b addendum.) **Selective custodial signing** is §8.6 over the `f1` block of §10.2b.
 
 **Open / decided after L2:**
