@@ -627,7 +627,7 @@ FACTOR_RANK = {"password+totp": 0, "se-unlocked": 1, "passkey": 2}  # D66 mappin
 
 #: The closed list of custodial event types (p4, protocol.md §8.5, spec D70): (type, log kind) -> the lowest hub role
 #: that may start it. ``read`` starts nothing. Everything else (break-glass verbs, members, devices, roles, grants,
-#: addon grants, restores, artifacts, agent-only types, host types, addon types) is ``not_custodial``: never built by
+#: addon grants (``addon.granted``, also with the optional ``"off": true``) and ``addon.enabled``, restores, artifacts, agent-only types, host types, addon types) is ``not_custodial``: never built by
 #: the hub, never accepted with ``auth: "hub"``. Policy and settings changes are not channel-startable in V3; people
 #: and visibility changes are admin-only with exact schemas (phase4.ACTIONS). On top of this table the host applies ticket-format §5.4's "who may
 #: sign what" with the hub role mapped to the member role (admin -> owner, edit -> member, read -> viewer).

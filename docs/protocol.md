@@ -739,7 +739,7 @@ them as `not_custodial`. People and visibility changes are `admin`-only through 
 why:** `workspace.created`, `member.*`, `role.changed` (members and roles come from
 grants and snapshots); `device.*` except `device.excluded` (§8.8) (hub users have no device keys); `hub.joined`, `hub.left` (owner's local key at the
 terminal, break-glass); `grant.issued` (the host makes the secret: §8.8 `grant.requested`); `addon.granted` (the host derives the
-manifest fields); `restore`, `invalid.acknowledged` (owner recovery); `artifact.*` and `ticket.updated` with
+manifest fields; it may carry the optional `"off": true`, see below) and `addon.enabled`; `restore`, `invalid.acknowledged` (owner recovery); `artifact.*` and `ticket.updated` with
 `sections` (the file bytes and body text are the host's; no transport for them yet); agent-only types (`claim.taken`,
 `task.*`); host types; addon types. Adding a type later needs no new `hv`: a host that does not list it refuses it,
 which fails closed.
@@ -766,6 +766,15 @@ ticket's uid). `log` is `"workspace"` or a ticket ULID. The fields are exactly (
 | `gate.changes_requested` | `gate`, `hash`, `text` |
 | `verdict.given` | `outcome`, `hash`, `text?` (required on `fail`) |
 | `addon.disabled`, `addon.purged` | `name` (addon name) |
+| `addon.granted`, `addon.enabled` | not custodial (`not_custodial` whatever the fields, so also with `off`); see the note below |
+
+**Add-on install state (core #1237; not custodial, so the hub never builds these).** `addon.granted` may carry the optional
+field `"off": true`: the add-on is granted but stays Off. Only the value `true` is valid; `false`, any other value or `null` is
+malformed (absent = On). `addon.enabled {name, version, package_sha256}` is the owner's one-click turn-on of a granted,
+disabled add-on at exactly the version and package hash of its current signed grant. Both are host types: an action naming either is
+`not_custodial` (vectors `action_addon_granted_not_custodial`, `action_addon_granted_off_*`, `action_addon_enabled_not_custodial`),
+and a custodial event of either type is `not_custodial` (`custodial_event_addon_enabled_not_custodial`, `custodial_event_addon_granted_off_not_custodial`). Consumers that verify
+core's log replay `off` and `addon.enabled` from core's own vectors.
 
 **A new ticket's uid and key (L2-D15-4).** For `ticket.created` the hub proposes the `key` and the new uid. The uid is
 any fresh ULID (its derivation is not normative). The host accepts only `key == next_key` (its own allocator, which may

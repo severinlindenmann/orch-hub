@@ -656,6 +656,7 @@ def build_p4(
         ("hub.joined", "owner's local key only"),
         ("grant.issued", "the grant secret is the host's"),
         ("addon.granted", "the host derives the manifest fields"),
+        ("addon.enabled", "host type: the owner turns an installed add-on on (core #1237)"),
         ("restore", "owner-only recovery, not custodial in hv 0"),
         ("device.added", "hub users have no device keys"),
         ("task.done", "agent-only"),
@@ -670,6 +671,26 @@ def build_p4(
             {"error": "not_custodial"},
             note,
         )
+    for nm, off, note in (
+        ("true", True, "off: true is the only valid value, and the type is still the host's"),
+        ("false", False, "off: false is malformed on the host; the hub refuses the type before the fields"),
+        ("string", "true", "any other value is malformed on the host"),
+        ("null", None, "null is malformed on the host"),
+    ):
+        act(
+            f"action_addon_granted_off_{nm}_not_custodial",
+            {"type": "addon.granted", "log": "workspace", "off": off},
+            "admin",
+            {"error": "not_custodial"},
+            note,
+        )
+    act(
+        "action_addon_enabled_fields_not_custodial",
+        {"type": "addon.enabled", "log": "workspace", "name": "wiki", "version": "1.0.0", "package_sha256": h},
+        "admin",
+        {"error": "not_custodial"},
+        "addon.enabled {name, version, package_sha256} is core's event; the hub never builds it",
+    )
     for f, v in (
         ("sig", "AAAA"),
         ("actor", {"kind": "person"}),
@@ -815,6 +836,17 @@ def build_p4(
         4,
         "a new ticket's first event has based_on null",
     )  # fmt: skip
+    # core #1237: host types, never custodial; a hub-signed event of either is refused whatever the payload
+    pkg = "sha256:" + S.fake_seed("hub/ev/pkg").hex()
+    for nm, typ, pl, why in (
+        ("addon_enabled", "addon.enabled", {"name": "wiki", "version": "1.0.0", "package_sha256": pkg},
+         "addon.enabled is the owner's, never started through a channel"),
+        ("addon_granted_off", "addon.granted", {"name": "wiki", "version": "1.0.0", "off": True},
+         "addon.granted (also with off: true) is the host's"),
+    ):  # fmt: skip
+        case(f"custodial_event_{nm}_not_custodial", "custodial",
+             {**adm, "log": "workspace", "event": custodial(typ=typ, log="workspace", payload=pl)},
+             {"error": "not_custodial"}, 4, why)  # fmt: skip
     # phase 5 (§8.8, V3-D29): the event side of the new types at the host
     pcl = {"gates": {"plan": {"approvers": ["owner"], "count": 1, "not": [], "applies": "all", "independent": False}}}
     case("custodial_event_policy_changed_ticket", "custodial",
